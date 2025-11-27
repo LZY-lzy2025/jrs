@@ -2,32 +2,33 @@
 
 class JrsScraper
 {
-    // 精简域名池，专注于响应正常的源
-    // jrs04 和 jrszhibo 已经挂了，去掉它们防止浪费时间
+    // 更换为静态 HTML 网站，避开 Vue/React 渲染问题
     private $domains = [
-        'http://m.jrskan.com',      // 主力源
-        'http://www.jrskan.com',    // 备用
-        'http://www.jrs05.com'      // 备用2
+        'http://www.360bo.com',    // 推荐：纯静态 HTML，容易抓取
+        'https://www.yqqk.cc',     // 备用：静态表格
     ];
 
-    // 依然伪装成 iPhone，因为手机版页面干扰最少
-    private $userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
+    // 伪装成电脑浏览器，因为这些老站对 PC 支持更好
+    private $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     
-    // 用于调试，存储最后一次获取的 HTML原始内容
     public $lastHtml = '';
     public $lastError = '';
 
-    public function fetchUrl($url, $referer = '')
+    private function fetchUrl($url, $referer = '')
     {
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
         
-        // 极简 Header，有时候 Header 太多反而被怀疑
+        // 强制 HTTP/1.1，有些老旧服务器不支持 HTTP/2
+        curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+        
         $headers = [
-            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language: zh-CN,zh;q=0.9,en;q=0.8',
-            'Connection: keep-alive'
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language: zh-CN,zh;q=0.9',
+            'Connection: keep-alive',
+            'Cache-Control: no-cache',
+            'Pragma: no-cache'
         ];
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
@@ -35,8 +36,7 @@ class JrsScraper
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         curl_setopt($ch, CURLOPT_USERAGENT, $this->userAgent);
         curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-        // 关键：强制接受 gzip，防止乱码
-        curl_setopt($ch, CURLOPT_ENCODING, ''); 
+        curl_setopt($ch, CURLOPT_ENCODING, ''); // 解压 Gzip
         
         if ($referer) curl_setopt($ch, CURLOPT_REFERER, $referer);
         
@@ -59,78 +59,86 @@ class JrsScraper
             if (!empty($data)) {
                 return ['status' => 'success', 'source' => $domain, 'data' => $data];
             }
-            $errors[] = "$domain: " . ($this->lastError ?: 'No matches (HTML fetched but regex failed)');
+            // 记录每个域名的失败原因
+            $len = strlen($this->lastHtml);
+            $errors[] = "$domain: " . ($this->lastError ?: "HTML fetched ($len bytes) but regex failed");
         }
-        return ['status' => 'error', 'message' => '解析失败', 'details' => $errors, 'debug_html' => substr($this->lastHtml, 0, 500)];
+        return ['status' => 'error', 'message' => '所有源站解析失败', 'details' => $errors, 'debug_html' => substr($this->lastHtml, 0, 1000)];
     }
 
     private function tryParseList($baseUrl)
     {
         $html = $this->fetchUrl($baseUrl);
-        $this->lastHtml = $html; // 保存 HTML 供调试
+        $this->lastHtml = $html; 
         
         if (!$html) return [];
 
         $matches = [];
         
-        // 【核弹级正则】
-        // 逻辑：寻找页面上所有的 <a href="...">...</a>
-        // 不管它在什么标签里。
-        preg_match_all('/<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is', $html, $links);
-        
-        if (empty($links[0])) return [];
-
-        foreach ($links[0] as $i => $fullTag) {
-            $rawUrl = $links[1][$i];
-            $rawText = strip_tags($links[2][$i]); // 去掉标签，只留文字
+        // 针对 www.360bo.com 的解析逻辑
+        if (strpos($baseUrl, '360bo') !== false) {
+            // 360bo 结构通常是：<div class="xingcheng">...<span>03:00</span>...<a href="...">队伍vs队伍</a>
+            // 我们用通用逻辑：找时间 + 链接
+            preg_match_all('/(\d{1,2}:\d{2}).*?<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is', $html, $blocks);
             
-            // 清理文本
-            $text = preg_replace('/\s+/', ' ', trim($rawText));
-            
-            // 过滤逻辑：
-            // 1. 链接不能是 js
-            if (stripos($rawUrl, 'javascript') !== false) continue;
-            
-            // 2. 【关键】必须包含时间格式 (如 08:00, 23:30)
-            if (!preg_match('/(\d{1,2}:\d{2})/', $text, $timeMatch)) continue;
-            
-            // 3. 过滤掉看起来像导航栏的短词 (比如 "直播大厅", "比分直播")
-            if (mb_strlen($text) < 4) continue;
-
-            // 如果到了这里，这很大概率是一场比赛
-            $time = $timeMatch[1];
-            
-            // 补全 URL
-            if (strpos($rawUrl, 'http') === false) {
-                $url = rtrim($baseUrl, '/') . '/' . ltrim($rawUrl, '/');
-            } else {
-                $url = $rawUrl;
+            if (!empty($blocks[0])) {
+                foreach ($blocks[0] as $i => $full) {
+                    $time = $blocks[1][$i];
+                    $rawUrl = $blocks[2][$i];
+                    $title = strip_tags($blocks[3][$i]);
+                    
+                    // 过滤非比赛链接
+                    if (strpos($title, 'vs') === false && strpos($title, 'VS') === false) continue;
+                    
+                    $matches[] = $this->formatItem($baseUrl, $time, $title, $rawUrl);
+                }
             }
-            
-            // 简单的去重 (防止同一个比赛有多个链接)
-            $matches[] = [
-                'time' => $time,
-                'title' => $text,
-                'url' => $url,
-                'status' => (stripos($text, 'ing') !== false || stripos($text, '播') !== false) ? 'live' : 'upcoming'
-            ];
         }
         
-        // 简单的去重：根据标题和时间
-        $uniqueMatches = [];
-        $seen = [];
-        foreach ($matches as $m) {
-            $key = $m['time'] . $m['title'];
-            if (!isset($seen[$key])) {
-                $seen[$key] = true;
-                $uniqueMatches[] = $m;
+        // 针对 yqqk.cc 或通用解析逻辑 (如果上面没抓到)
+        if (empty($matches)) {
+            // 寻找表格行 <tr>...</tr>
+            preg_match_all('/<tr[^>]*>(.*?)<\/tr>/is', $html, $rows);
+            foreach ($rows[1] as $row) {
+                // 提取时间
+                if (!preg_match('/(\d{1,2}:\d{2})/', $row, $tm)) continue;
+                $time = $tm[1];
+                
+                // 提取链接
+                if (!preg_match('/<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is', $row, $link)) continue;
+                $rawUrl = $link[1];
+                $title = strip_tags($link[2]);
+                
+                if (mb_strlen($title) < 5) continue; // 太短的标题通常不是比赛
+                
+                $matches[] = $this->formatItem($baseUrl, $time, $title, $rawUrl);
             }
         }
 
-        return $uniqueMatches;
+        return $matches;
+    }
+    
+    private function formatItem($baseUrl, $time, $title, $rawUrl) {
+        // 清理标题
+        $title = preg_replace('/\s+/', ' ', trim($title));
+        $title = str_replace(['直播', '高清', 'CCTV'], '', $title);
+        
+        // 补全 URL
+        if (strpos($rawUrl, 'http') === false) {
+            $url = rtrim($baseUrl, '/') . '/' . ltrim($rawUrl, '/');
+        } else {
+            $url = $rawUrl;
+        }
+        
+        return [
+            'time' => $time,
+            'title' => $title,
+            'url' => $url,
+            'status' => 'live' // 简化状态判断
+        ];
     }
 
-    // ... getStreamUrl 方法保持不变 ...
+    // ... getStreamUrl 保持不变 ...
     public function getStreamUrl($detailUrl)
     {
         $html = $this->fetchUrl($detailUrl);
@@ -141,7 +149,6 @@ class JrsScraper
              return ['type' => 'video', 'url' => stripslashes($m[1])];
         }
         
-        // 增加对 player.php?url=... 的提取
         if (preg_match('/url=(http[^&"]+\.m3u8)/i', $html, $m)) {
             return ['type' => 'video', 'url' => urldecode($m[1])];
         }
