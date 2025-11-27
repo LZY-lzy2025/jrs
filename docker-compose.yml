@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  jrs-scraper:
+    build: .
+    container_name: jrs_scraper_app
+    ports:
+      - "8080:80"
+    volumes:
+      # 挂载 src 目录，方便开发时修改代码立即生效
+      - ./src:/var/www/html
+    restart: unless-stopped
