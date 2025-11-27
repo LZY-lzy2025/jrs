@@ -1,62 +1,45 @@
 <?php
-// 开启错误显示
+// 强制显示错误
 ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
-
 require_once 'JrsScraper.php';
 
 $scraper = new JrsScraper();
-
-echo "<h1>JRS 抓取调试器</h1>";
-echo "<p>服务器时间: " . date('Y-m-d H:i:s') . "</p>";
-
-// 1. 测试 cURL 环境
-echo "<h2>1. 环境检测</h2>";
-if (function_exists('curl_init')) {
-    echo "<span style='color:green'>cURL 扩展已安装 ✅</span><br>";
-} else {
-    echo "<span style='color:red'>cURL 扩展未安装 ❌</span><br>";
-}
-
-// 2. 尝试获取列表
-echo "<h2>2. 尝试抓取数据</h2>";
 $list = $scraper->getLiveList();
 
+echo "<h1>🔍 深度调试报告</h1>";
+
 if ($list['status'] === 'success') {
-    echo "<h3 style='color:green'>抓取成功! (源站: " . $list['source'] . ")</h3>";
-    echo "<p>获取到 " . count($list['data']) . " 场比赛。</p>";
-    echo "<textarea style='width:100%;height:300px'>" . print_r($list['data'], true) . "</textarea>";
+    echo "<h2 style='color:green'>✅ 抓取成功！</h2>";
+    echo "<p>来源: {$list['source']} | 数量: " . count($list['data']) . "</p>";
+    echo "<pre>" . print_r($list['data'], true) . "</pre>";
 } else {
-    echo "<h3 style='color:red'>抓取失败</h3>";
-    echo "<strong>错误信息:</strong> " . $list['message'] . "<br>";
-    echo "<strong>详细日志:</strong><br>";
-    echo "<ul>";
-    foreach ($list['details'] as $err) {
-        echo "<li>" . htmlspecialchars($err) . "</li>";
+    echo "<h2 style='color:red'>❌ 抓取失败</h2>";
+    echo "<p>错误: " . $list['message'] . "</p>";
+    
+    echo "<h3>详细日志:</h3><ul>";
+    if (isset($list['details'])) {
+        foreach ($list['details'] as $err) echo "<li>$err</li>";
     }
     echo "</ul>";
+
+    echo "<h3>🧐 网页返回内容分析:</h3>";
+    // 打印 scraper 内部存储的最后一次 HTML
+    $html = $scraper->lastHtml;
+    
+    if (empty($html)) {
+        echo "<p style='color:red'>HTML 内容为空！可能是 cURL 请求被拦截且没返回任何数据。</p>";
+    } else {
+        $len = strlen($html);
+        echo "<p>获取到 HTML 长度: <strong>$len 字节</strong></p>";
+        
+        // 检查是不是 Cloudflare 盾
+        if (strpos($html, 'Just a moment') !== false || strpos($html, 'challenge-platform') !== false) {
+             echo "<div style='background:#ffebee;padding:10px;border:1px solid red'>⚠️ <strong>检测到 Cloudflare 5秒盾！</strong><br>源站识别出了你是爬虫。Render/Zeabur 的 IP 被标记了。</div>";
+        } else {
+             echo "<p>网页前 800 个字符预览 (请截图这里):</p>";
+             echo "<textarea style='width:100%;height:200px;font-family:monospace'>" . htmlspecialchars(substr($html, 0, 800)) . "</textarea>";
+        }
+    }
 }
-
-// 3. 连通性测试 (Test Connectivity)
-echo "<h2>3. 连通性测试 (Google & JRS)</h2>";
-
-function testConnect($url) {
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-    curl_setopt($ch, CURLOPT_NOBODY, true); // 只取头部
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    $res = curl_exec($ch);
-    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    return $code;
-}
-
-$googleCode = testConnect('https://www.google.com');
-echo "连接 Google.com: " . ($googleCode ? $googleCode : '失败 (网络不通)') . "<br>";
-
-$jrsCode = testConnect('http://m.jrskan.com');
-echo "连接 m.jrskan.com: " . ($jrsCode ? $jrsCode : '失败') . "<br>";
-
 ?>
